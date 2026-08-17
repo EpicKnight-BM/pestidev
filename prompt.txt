@@ -42,6 +42,16 @@ You can upload at most `uploadBudget.remaining` postings this run. Reading a det
 - If `uploadBudget.remaining` is 0, do NOT verify or submit any postings this run. You may still do cheap site-level triage and send `sitesChecked` (never rate-limited).
 - Recording sites in `sitesChecked` / `rejected` is NOT limited — only actual job-posting uploads are.
 
+### THE TIME RULE — never let one page eat the run
+
+One unresponsive page can consume an entire run. Confirmed incident 2026-08-17: a Step 2 re-check fetch of `jobs.ozeki.hu` hung for THIRTY-THREE MINUTES without returning, and the run had to be killed manually before it ever reached Step 3 or its Step 4 POST — so it submitted NOTHING, despite the repo, the token, the API and every filter working perfectly. Nothing else went wrong. One slow fetch was enough to waste the whole run.
+
+So:
+- **Give any single page fetch about 90 seconds.** If it has not returned by then, abandon that URL. Do NOT retry it, do NOT try a variant of it, and do NOT wait "just a bit longer" — a page that hasn't answered in 90 seconds is not about to.
+- **Record it and move on.** Put the site in `sitesChecked` with a status noting the timeout (e.g. `"status":"unreachable_timeout"`), keeping whatever `listingUrls` you already had for it. That advances `lastChecked` so it isn't retried immediately, and next run gets a clean attempt.
+- **A timeout is NEVER a reason to stop the run.** Skipping one site costs one site. Stalling costs the POST — and a run that never POSTs produced nothing at all.
+- **Watch the clock overall.** If you are roughly 40 minutes in and still have not POSTed, stop discovering new companies, finish evaluating only what you already have in hand, and go straight to Step 4. A partial run that submits beats a thorough one that dies before submitting.
+
 ## Step 2 — re-check aged sites (cheap change-check FIRST, full work only if something actually changed)
 
 For every entry in `sites` whose `lastChecked` is more than 7 days ago:
