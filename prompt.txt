@@ -46,11 +46,28 @@ You can upload at most `uploadBudget.remaining` postings this run. Reading a det
 
 One unresponsive page can consume an entire run. Confirmed incident 2026-08-17: a Step 2 re-check fetch of `jobs.ozeki.hu` hung for THIRTY-THREE MINUTES without returning, and the run had to be killed manually before it ever reached Step 3 or its Step 4 POST — so it submitted NOTHING, despite the repo, the token, the API and every filter working perfectly. Nothing else went wrong. One slow fetch was enough to waste the whole run.
 
-So:
-- **Give any single page fetch about 90 seconds.** If it has not returned by then, abandon that URL. Do NOT retry it, do NOT try a variant of it, and do NOT wait "just a bit longer" — a page that hasn't answered in 90 seconds is not about to.
-- **Record it and move on.** Put the site in `sitesChecked` with a status noting the timeout (e.g. `"status":"unreachable_timeout"`), keeping whatever `listingUrls` you already had for it. That advances `lastChecked` so it isn't retried immediately, and next run gets a clean attempt.
-- **A timeout is NEVER a reason to stop the run.** Skipping one site costs one site. Stalling costs the POST — and a run that never POSTs produced nothing at all.
-- **Watch the clock overall.** If you are roughly 40 minutes in and still have not POSTed, stop discovering new companies, finish evaluating only what you already have in hand, and go straight to Step 4. A partial run that submits beats a thorough one that dies before submitting.
+**1. Fetch pages with curl, never bare WebFetch.** WebFetch has NO timeout parameter and CANNOT be interrupted once it hangs — that is exactly how the 33-minute stall happened, and resolving to "give it a minute" is worthless when the tool gives you no way to stop waiting. Fetch like this, with an OUTER `timeout` wrapping curl's own limits, and always capture the exit code:
+
+```
+timeout 70 curl -sS --connect-timeout 10 --max-time 60 -L "<url>" -o <file> -w "HTTP:%{http_code} TIME:%{time_total}\n" ; echo "exit=$?"
+```
+
+Three guards, each catching a different failure:
+  - `--connect-timeout 10` — a dead or refusing host dies in 10 seconds instead of burning the whole budget.
+  - `--max-time 60` — bounds a slow-but-alive page. curl enforces this on itself.
+  - `timeout 70` — the SHELL kills the process outright. This is the one that actually saves you: `--max-time` is a limit curl applies to *itself*, and a curl wedged in DNS resolution, a stuck TLS handshake or a blocked syscall can overshoot it. `timeout` is not negotiable. Keep it ~10s above `--max-time` so curl normally exits cleanly on its own first.
+
+Read the exit code every time: `124` = `timeout` killed it, `28` = curl hit `--max-time`, `6`/`7` = host didn't resolve or refused. Any of those means SKIP THIS URL. None of them is a reason to retry.
+
+Fall back to WebFetch ONLY when you genuinely need rendered content curl cannot give you, knowing that call is uninterruptible once it starts.
+
+**2. Cap each SITE at roughly 5 minutes total.** The per-fetch limit alone does not bound a site: 20 postings at 60 seconds each is 20 minutes without any single fetch ever misbehaving. Once you pass ~5 minutes on one company, stop opening further detail pages there, keep whatever already passed the 6 filters, record the postings you did manage to enumerate (stating the count honestly per the count-before-filter rule), and move on to the next site.
+
+**3. Record it and move on.** Put the site in `sitesChecked` with a status noting the timeout (e.g. `"status":"unreachable_timeout"`), keeping whatever `listingUrls` you already had for it. That advances `lastChecked` so it isn't retried immediately, and next run gets a clean attempt.
+
+**4. A timeout is NEVER a reason to stop the run.** Skipping one site costs one site. Stalling costs the POST — and a run that never POSTs produced nothing at all.
+
+**5. Watch the clock overall.** If you are roughly 40 minutes in and still have not POSTed, stop discovering new companies, finish evaluating only what you already have in hand, and go straight to Step 4. A partial run that submits beats a thorough one that dies before submitting.
 
 ## Step 2 — re-check aged sites (cheap change-check FIRST, full work only if something actually changed)
 
