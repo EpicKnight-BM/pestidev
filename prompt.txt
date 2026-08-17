@@ -8,13 +8,15 @@ The API re-applies its own deterministic checks (IT-title match, senior-TITLE de
 
 ## Authentication
 
-All API calls below use this bearer token:
+All API calls below authenticate with a bearer token. **The token is NOT in this file** — it is supplied in the run instruction that told you to read this file. That split is deliberate: this file is version-controlled, so a token committed here is readable by anyone with repo access (one was, until 2026-08-17, in a public repo — that token has since been rotated and is dead). The routine's stored prompt is not part of the repo, so the live secret lives there instead.
+
+Set it as a shell variable at the start of your run and use it in both calls below:
 
 ```
-AI_INGEST_TOKEN=kZKSfrt3vbHK-f44GH-lIz5zyrwXUBOudBallVKTRlQ
+export AI_INGEST_TOKEN="<the token given in your run instruction>"
 ```
 
-Set it as a shell variable at the start of your run and use it in both calls. It authorizes ONLY this one endpoint. If a call returns 401, STOP immediately and report that the token is invalid — do not try to work around it, and do not attempt any other credential or endpoint.
+It authorizes ONLY this one endpoint. If a call returns 401, STOP immediately and report that the token is invalid — do not try to work around it, and do not attempt any other credential or endpoint. If your run instruction did NOT give you a token, STOP and report that as well: do not guess one, do not go looking for one in the repo or its git history, and do not proceed without it.
 
 ## Step 1 — GET your memory AND your upload budget
 
