@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "Permissions for the unattended 'Daily job-board scrape (pestidev)' cloud routine.",
+    "The routine's stored prompt asserts that a scoped rule for the two curl calls already",
+    "exists in .claude/settings.local.json. It did not — this repo contained only prompt.txt.",
+    "Note settings.local.json is the wrong filename for this anyway: a routine gets a fresh",
+    "checkout, so only a COMMITTED settings file reaches it, and *.local is conventionally",
+    "gitignored (MyWebsite's .gitignore does exactly that).",
+    "",
+    "Why Bash(curl:*) is broad rather than pinned to bakan7.netlify.app:",
+    "Bash rules match on literal command PREFIX, and prompt.txt's own examples vary the",
+    "invocation (-d inline vs -d @file.json). A pinned prefix would deny a legitimate call",
+    "mid-run, and a run whose POST never fires produces nothing at all. The blast radius is",
+    "bounded by the token itself: AI_INGEST_TOKEN is deliberately low-privilege (see",
+    "AI_SCRAPER_PLAN.md section 0 in Andrssss/MyWebsite) — it reaches only the filtered",
+    "ai-registry / ai-ingest / ai-deactivate endpoints, never the ~30 background scrapers",
+    "that CRON_SECRET authorizes. The API re-applies its own deterministic filters on top.",
+    "",
+    "git push/commit are denied: the current design has NO git output — the API POST is the",
+    "only output. The superseded registry-file design pushed to main and failed silently on",
+    "every run from 2026-07-17 onward, so not one finding ever reached the DB."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "WebFetch",
+      "WebSearch",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "TodoWrite"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
