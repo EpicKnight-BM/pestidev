@@ -1,6 +1,6 @@
 ---
 name: company-discovery
-description: "[prompt-v2.txt ONLY — do not use on a run driven by prompt.txt] Searches for Hungarian companies with their own career pages that are not yet tracked, rotating across role/platform/sector query buckets. Returns candidate companies with domains, already de-duplicated against tracked sites and the exclusion list. Does NOT open career pages or evaluate postings."
+description: "[prompt-v2.md ONLY — do not use on a run driven by prompt.md] Searches for Hungarian companies with their own career pages that are not yet tracked, rotating across role/platform/sector query buckets. Returns candidate companies with domains, already de-duplicated against tracked sites and the exclusion list. Does NOT open career pages or evaluate postings."
 model: sonnet
 tools: WebSearch, Bash, Read
 maxTurns: 20

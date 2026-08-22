@@ -1,6 +1,6 @@
 ---
 name: site-change-check
-description: "[prompt-v2.txt ONLY — do not use on a run driven by prompt.txt] Fetches one already-tracked career page listing and reports whether its set of posting URLs changed since the last run. Returns the current full URL set plus any new URLs. Does NOT open detail pages or judge postings."
+description: "[prompt-v2.md ONLY — do not use on a run driven by prompt.md] Fetches one already-tracked career page listing and reports whether its set of posting URLs changed since the last run. Returns the current full URL set plus any new URLs. Does NOT open detail pages or judge postings."
 model: haiku
 tools: Bash, Read
 maxTurns: 8

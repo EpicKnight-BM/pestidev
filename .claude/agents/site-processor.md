@@ -1,6 +1,6 @@
 ---
 name: site-processor
-description: "[prompt-v2.txt ONLY — do not use on a run driven by prompt.txt] Processes ONE company end to end: locates its full career listing, enumerates every posting, counts them before filtering, reads each detail page, and applies the 6 filters. Returns structured findings plus an honest per-site count. Used both for Step 2 sites that changed and for Step 3 new discoveries."
+description: "[prompt-v2.md ONLY — do not use on a run driven by prompt.md] Processes ONE company end to end: locates its full career listing, enumerates every posting, counts them before filtering, reads each detail page, and applies the 6 filters. Returns structured findings plus an honest per-site count. Used both for Step 2 sites that changed and for Step 3 new discoveries."
 model: sonnet
 tools: Bash, WebSearch, WebFetch, Read
 maxTurns: 30
