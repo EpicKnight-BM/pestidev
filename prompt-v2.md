@@ -43,8 +43,8 @@ It authorizes ONLY this one endpoint. If a call returns 401, STOP immediately an
 You start every run with NO memory of previous runs. Fetch your accumulated state FIRST:
 
 ```
-curl -sS -H "Authorization: Bearer $AI_INGEST_TOKEN" \
-  https://bakan7.netlify.app/.netlify/functions/ai-registry
+timeout 40 curl -sS --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $AI_INGEST_TOKEN" \
+  https://bakan7.netlify.app/.netlify/functions/ai-registry -o registry.json -w "HTTP:%{http_code}\n"
 ```
 
 The response gives you:
