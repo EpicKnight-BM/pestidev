@@ -186,6 +186,17 @@ to happen again — confirmed 2026-08-21: `sites["nixstech"]` was re-fetched on 
 `permanentlyRejected` already held three separate entries for it (see INCIDENTS.md § `nix` / NIX
 Hungary Kft. / nixstech.com).
 
+**Entries with `status: "needs_first_check"` (no `lastChecked`, no `listingUrls`) are DUE NOW.** The
+server seeds them when another channel (the ChatGPT discovery) inserted a posting for a company this
+registry has never checked; `url` is just that one posting, not a listing page. Do NOT send them to
+`site-change-check` — there is no `storedListingUrls` to diff, so it would report the company's whole
+listing as new (the failure described below). Treat each as a brand-new company instead: dispatch
+`site-processor` sequentially under the budget rule, with `slug` → `slug`, the entry's `url` →
+`listingUrl` (a hint; the processor locates the real listing itself) and `knownActiveTitles` from the
+Step 1 lookup (the already-inserted posting will be there, so it is not re-submitted). Record the
+result in `sitesChecked` as usual — that sets `lastChecked` and `listingUrls`, and the entry becomes a
+normal one. Still subject to the `permanentlyRejected` / `ats-crawl` host removals above.
+
 For every REMAINING entry in `sites` whose `lastChecked` is more than 7 days ago:
 
 1. **Dispatch `site-change-check`** with the site's `url`, `slug`, `storedListingUrls`, and any
