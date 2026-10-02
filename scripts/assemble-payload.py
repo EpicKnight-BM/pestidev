@@ -25,7 +25,6 @@ import glob
 import json
 import os
 import sys
-from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pestidev_lib as lib  # noqa: E402
@@ -80,8 +79,8 @@ def main():
             if slug in rej:
                 continue
             listing = r.get("listingUrl") or prev.get("url") or ""
-            rj.append({"slug": slug, "domain": (urlparse(listing).hostname or "").lower()
-                       or None, "company": r.get("company") or prev.get("company") or slug,
+            rj.append({"slug": slug, "domain": lib.record_domain(listing, prev.get("url")),
+                       "company": r.get("company") or prev.get("company") or slug,
                        "reason": r.get("rejectReason") or r.get("note") or "rejected permanently"})
             continue
 

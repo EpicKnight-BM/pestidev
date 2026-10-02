@@ -200,6 +200,22 @@ def identities(value):
     return out
 
 
+def record_domain(*urls):
+    """The `domain` to store on a `permanentlyRejected` record: the company's identity, not just
+    its host. On a shared ATS host that means the tenant path (`join.com/companies/kfs1`) — a bare
+    `join.com` identifies nobody, so once the server retires the matching `sites` entry the company
+    could be "discovered" again. Tries each URL in order; falls back to the plain host."""
+    for u in urls:
+        ids = identities(u or "")
+        if ids:
+            return ids[0]
+    for u in urls:
+        host, _ = _split(u or "")
+        if host:
+            return host
+    return None
+
+
 def hosts_in_text(text):
     """Pull hostname-looking tokens out of free text (for permanentlyRejected records whose
     `domain` field holds a sentence instead of a domain)."""

@@ -104,7 +104,8 @@ def main():
         if url and lib.is_ats_crawl_host(url):
             host = url.split("//", 1)[-1].split("/", 1)[0]
             plan["atsCrawlToRetire"].append({
-                "slug": slug, "domain": host, "company": site.get("company") or slug,
+                "slug": slug, "domain": lib.record_domain(url) or host,
+                "company": site.get("company") or slug,
                 "reason": "covered by the board's own ats-crawl source"})
             continue
         last = lib.parse_ts(site.get("lastChecked"))
