@@ -3,7 +3,7 @@ name: company-discovery
 description: "[prompt-v2.md ONLY — do not use on a run driven by prompt.md] Searches for Hungarian companies with their own career pages that are not yet tracked, rotating across role/platform/sector query buckets. Returns candidate companies with domains, already de-duplicated against tracked sites and the exclusion list. Does NOT open career pages or evaluate postings."
 model: sonnet
 tools: WebSearch, Bash, Read, Write
-maxTurns: 50
+maxTurns: 35
 ---
 
 You find NEW candidate companies worth investigating. You do not open career pages, you do not
@@ -24,11 +24,10 @@ endpoint, and never go looking for a token.
   the rare entry with no domain). This is `knownDomains` and `permanentlyRejected` combined;
   everywhere below that says "in `knownDomains`" means "a line in this file". You are given a path
   rather than the list itself because the list is ~900 lines and pasting it inline is what caused it
-  to be dropped from the dispatch entirely — see **Load the file FIRST** below. **Each line is a
-  bare domain or slug, never a sentence** — `permanentlyRejected` used to be a free-text
-  `"Company (domain) — reason"` string, and a line built from that whole string could never
-  `grep -qxF`-match a candidate's bare domain; the exact-match check below only works now that the
-  registry moved to structured `{slug, domain, company, reason}` records.
+  to be dropped from the dispatch entirely — see **Load the file FIRST** below. The file is written
+  by `scripts/known-domains.py` (via `prep-run.py`), never by hand: each line is a normalized
+  identity — a bare domain, a shared-ATS tenant path, or (only when a rejected record has no
+  usable domain at all) a slug — never a sentence.
 - `wanted` — how many fresh candidates the orchestrator wants back
 - `recentBuckets` — optional; which query buckets recent runs already used, so you can rotate away
 
@@ -86,15 +85,22 @@ Your very first action is to load `knownDomainsFile` and confirm it is real:
 wc -l "<knownDomainsFile>" ; echo "exit=$?"
 ```
 
-Check each candidate against it with an EXACT whole-line match, never a substring scan:
+Check candidates with the committed script — never with your own `grep`, `sed` or Python. Pass the
+URL you actually found (a posting URL or a career-page URL is better than a bare domain, since it
+carries the tenant path) — several at once is fine:
 
 ```
-grep -qxF "<the candidate's domain or tenant identity>" "<knownDomainsFile>" && echo KNOWN || echo NEW
+timeout 30 python3 scripts/known-domains.py check "<url or domain>" ["<url or domain>" ...] --file "<knownDomainsFile>"
 ```
 
-`grep -qxF` is exact (`-x` whole line, `-F` literal), which is precisely the matching rule the rest
-of this section describes — it will not let `recruitee.com` swallow `someothercompany.recruitee.com`.
-Reading it from disk also costs you no context, so there is no list too large to check against.
+It prints `KNOWN <candidate> (<matched line>)` or `NEW <candidate>` per argument. The file was built
+by the same script, so both sides get the same normalization: `www.` stripped, the tenant path kept
+on shared ATS hosts (`join.com/companies/kfs1`, `job-boards.greenhouse.io/gravity`), and a company's
+own subdomain matched to its parent (`karrier.nisz.hu` ⇄ `nisz.hu`). Hand-rolled checks kept getting
+one of those wrong — KFS GROUP, GitRabbit and INSPYRE came back as "new" join.com tenants on
+2026-09-26, 09-29 and 10-02, NISZ and Pont Systems on 09-30 via a subdomain mismatch (see INCIDENTS.md
+§ join.com tenant collisions in the known-domains file). Reading the file from disk also costs you
+no context, so there is no list too large to check against.
 
 **If the path is missing from your dispatch, or the file does not exist or is empty, STOP and say
 so.** Return `"candidates": []` with a `note` opening `NO knownDomainsFile` and nothing else. Do NOT
@@ -121,15 +127,11 @@ see INCIDENTS.md § Domain dedup — re-checking an already-tracked site ahead o
 `job-boards.greenhouse.io/gravity/jobs/8048230` and `job-boards.greenhouse.io/gravity` are the SAME
 tracked site.
 
-**Strip a leading `www.` from a candidate's domain before checking it, on ordinary (non-shared-ATS)
-sites.** `www.aican.hu` and `aican.hu` are the same site, but `grep -qxF` is an exact whole-line
-match and will not equate them on its own. `knownDomainsFile` is written with `www.` already
-stripped from ordinary hostnames, so normalize the candidate the same way first —
-`candidate_domain=$(echo "$raw_domain" | sed 's/^www\.//')` — then run the `grep -qxF` check against
-that. A candidate that only looks new because of a `www.` prefix difference is a false positive
-(confirmed 2026-09-20 — AiCAN re-surfaced as a "new" candidate this way; see INCIDENTS.md §
-`www.`-prefix domain mismatches in the known-domains dedup). This does not apply to the shared-ATS
-tenant paths below — those never carry a `www.` prefix to begin with.
+**`www.` and subdomain differences are the script's job, not yours.** `www.aican.hu`, `aican.hu` and
+`karrier.aican.hu` are the same company to `known-domains.py check` (confirmed 2026-09-20 — AiCAN
+re-surfaced as a "new" candidate when this was done by hand; see INCIDENTS.md § `www.`-prefix domain
+mismatches in the known-domains dedup). Do not strip or rewrite the candidate yourself first — pass
+it as found.
 
 ### On a SHARED ATS host, the slug IS the identity — do not drop a whole platform
 
@@ -146,7 +148,8 @@ shared-ATS-host platform by mistake).
   `recruitee.com`, `personio.com`, `workable.com`, `breezy.hr`, `join.com`, `karrierportal.hu`,
   `hrfelho.hu`), compare the **tenant** — the subdomain label or the first path segment — not the
   shared parent domain. `karrier.alfa.hu` being tracked says nothing about `karrier.posta.hu`.
-- Only drop as known when the FULL tenant identity matches.
+- Only drop as known when the FULL tenant identity matches. `known-domains.py check` already does
+  exactly this — a bare platform host like `join.com` or `recruitee.com` never matches anything.
 
 When in doubt, RETURN the candidate. A duplicate costs the orchestrator one cheap re-check that the
 `sites` map will catch; a wrongly-dropped company is invisible and never comes back.
@@ -254,8 +257,11 @@ against a 20-turn cap, returned nothing — see INCIDENTS.md § Turn-budget cuto
 reliable way to know exactly how many turns you've spent, so treat the rule below as a hard count
 instead, not a feel:
 
-- **Hard cap: 12 queries, full stop.** Count entries in your own `bucketsUsed` before every new
-  WebSearch call. The moment it would put you at your 13th query, do not run it — stop searching
+- **Hard cap: 12 WebSearch calls, full stop — EVERY call counts,** including the follow-up searches
+  you run to find a candidate's domain or confirm its career page, not just the bucket queries
+  (2026-10-01: a run counted only bucket queries and made ~23 searches against this cap). Keep a
+  running count in your checkpoint (`searchesUsed`) and check it before every new WebSearch call.
+  The moment it would put you at your 13th search, do not run it — stop searching
   immediately, no matter how promising the lead looks or how far short of `wanted` you are, and go
   straight to final dedup + writeup. Twelve queries covering all three buckets is enough for a
   thorough rotation per run; a 13th query has never been the difference between an empty and a
@@ -284,6 +290,7 @@ The content is a JSON object, not a bare array:
 ```json
 {
   "bucketsUsed": ["role:tesztautomatizálási mérnök", "platform:join.com"],
+  "searchesUsed": 3,
   "candidates": [ /* the candidate objects confirmed so far, per the return schema */ ],
   "checkedAgainst": 2315,
   "droppedAsKnown": 12,

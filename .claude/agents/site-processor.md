@@ -2,7 +2,7 @@
 name: site-processor
 description: "[prompt-v2.md ONLY — do not use on a run driven by prompt.md] Processes ONE company end to end: locates its full career listing, enumerates every posting, counts them before filtering, reads each detail page, and applies the 6 filters. Returns structured findings plus an honest per-site count. Used both for Step 2 sites that changed and for Step 3 new discoveries."
 model: sonnet
-tools: Bash, WebSearch, WebFetch, Read, mcp__pestidev__check_titles
+tools: Bash, WebSearch, WebFetch, Read, Write, mcp__pestidev__check_titles
 maxTurns: 40
 ---
 
@@ -29,6 +29,12 @@ return, not a submission.
 
 ## Your input
 
+- `dispatchFile` — optional path to a JSON file `scripts/prep-run.py` wrote for a tracked site
+  (Step 2 re-checks and `needs_first_check` entries). When given, Read it FIRST: its `company`,
+  `slug`, `url` (→ `listingUrl`), `platformNote`, `knownActiveTitles` and `resultFile` are your
+  inputs, and you take them from the file rather than from the dispatch text.
+- `resultFile` — where to write your final JSON (see "Write your result to `resultFile`" at the
+  end). Comes from `dispatchFile`, or directly in the dispatch for a Step 3 discovery.
 - `company` — company name
 - `domain` — the company's domain
 - `slug` — short lowercase company identifier to use in your return
@@ -476,7 +482,8 @@ still needs `English`. You are reading the actual page, so judge this directly r
   "slug": "<slug>",
   "company": "<company name>",
   "listingUrl": "<the full listing URL you settled on>",
-  "status": "has_opening" | "no_fit" | "unreachable_timeout" | "no_career_page" | "reject_permanent",
+  "source": "site-processor",
+  "status": "has_opening" | "no_fit" | "unreachable_timeout" | "bot_blocked" | "js_rendered" | "no_career_page" | "reject_permanent",
   "postingsFound": <N — total distinct postings on the listing>,
   "itRelevant": <M — how many were IT-relevant per filter 3>,
   "passedLevel": <K — how many passed filter 5>,
@@ -514,5 +521,19 @@ JS-rendered ATS with no per-job URL, wrong vertical, aggregator, already-covered
 the site's own `ats-crawl` source already harvests (the eight hosts above). A site with
 no fit TODAY is `no_fit`, not a permanent rejection.
 
+`bot_blocked` (HTTP 403/429, a captcha or "verification" wall) and `js_rendered` (a client-side
+shell with no posting links, sitemap or JSON endpoint you could find) are for a listing you cannot
+read TODAY on a site that is not structurally dead — both back the site off 30 days instead of
+re-fetching it every week. Never try to script past a bot-check; record it and stop.
+
 Do not exceed `budgetRemaining` findings. If you hit the cap, say so in `note` and still report the
 honest `postingsFound` count.
+
+## Write your result to `resultFile` — then return it
+
+Your last two actions are always: **`Write` the exact JSON above to `resultFile`**, then return the
+same JSON as your reply. The orchestrator builds the submission from that file with
+`scripts/assemble-payload.py` instead of retyping your reply — a hand-retyped payload put garbage
+into a site's `listingUrls` on 2026-10-02. Write it even for `no_fit`, `unreachable_timeout` and `reject_permanent`: a site with no
+result file is a site the run never records. Use `Write`, not a shell redirect. If no `resultFile`
+was given, write to `/tmp/pestidev-run/results/<slug>.json`.
