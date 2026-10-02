@@ -133,7 +133,21 @@
     "",
     "git push/commit are denied: both designs have NO git output - the registry submission is the",
     "only output. The superseded registry-file design pushed to main and failed silently on",
-    "every run from 2026-07-17 onward, so not one finding ever reached the DB."
+    "every run from 2026-07-17 onward, so not one finding ever reached the DB.",
+    "",
+    "=== ScheduleWakeup / CronCreate denied, 2026-10-03 ===",
+    "",
+    "A run is one session with one job; neither routine ever needs to schedule its own future",
+    "wakeups. v2 runs on 2026-09-26 and 09-27 dispatched subagents in the background, ended their",
+    "turn, then called ScheduleWakeup to poll for the agents - 'always wrong' per prompt-v2.md's",
+    "own recovery section, done anyway. prompt-v2.md now dispatches every agent in the foreground,",
+    "and denying both tools turns the rule into something the run cannot break.",
+    "",
+    "=== python3 run scripts, 2026-10-03 ===",
+    "",
+    "scripts/*.py (prep-run, known-domains, assemble-payload) are invoked as 'timeout N python3 scripts/<name>.py ...', so they are",
+    "covered by the existing Bash(timeout:*) rule - no new allow entry. Same reason every curl",
+    "fetch is written with a leading timeout."
   ],
   "enabledMcpjsonServers": ["pestidev"],
   "permissions": {
@@ -159,7 +173,9 @@
     ],
     "deny": [
       "Bash(git push:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "ScheduleWakeup",
+      "CronCreate"
     ]
   }
 }

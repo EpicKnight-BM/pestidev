@@ -98,10 +98,46 @@ The response gives you:
 - `sites` — every career page you have ever checked, each with `lastChecked`, `status`, and `listingUrls` — the exact set of posting URLs seen on its listing last time. `listingUrls` is what makes Step 2 cheap.
 - `permanentlyRejected` — companies/sites that can NEVER work regardless of timing. Never re-check these. **This list OUTRANKS `sites`.** When a company is in both, `permanentlyRejected` wins: dispatch nothing for it and never send a `sitesChecked` entry that would refresh it. See the priority rule at the top of Step 2.
 - `knownUrls` — job URLs already successfully submitted. Never submit these again.
-- `activeTitlesByCompany` — added 2026-09-02. A map from a normalized company name to the normalized titles of every posting currently ACTIVE in the live database for that company, across EVERY source — not just this routine's own past finds, but every hand scraper and `ats-crawl` too. This is the same (company, title) match the API uses to reject a duplicate on submission (`_ai_dupe_guard.mjs`) — you get it BEFORE `site-processor` spends a detail-page fetch and a filter judgment on a posting the API would reject anyway. **You (the orchestrator) own this lookup, not `site-processor`** — it has no registry access, same as every other credential-bearing state. Before dispatching `site-processor` for a company (Step 2 or Step 3), run `timeout 5 sh scripts/fold-name.sh company "<company name>"` and look up `activeTitlesByCompany[<that output>]`. Pass whatever array you get (possibly empty) to `site-processor` as its `knownActiveTitles` input — it applies the matching title-side normalization itself via the same script (`timeout 5 sh scripts/fold-name.sh title "<title>"`) before comparing.
+- `activeTitlesByCompany` — added 2026-09-02. A map from a normalized company name to the normalized titles of every posting currently ACTIVE in the live database for that company, across EVERY source — not just this routine's own past finds, but every hand scraper and `ats-crawl` too. This is the same (company, title) match the API uses to reject a duplicate on submission (`_ai_dupe_guard.mjs`) — you get it BEFORE `site-processor` spends a detail-page fetch and a filter judgment on a posting the API would reject anyway. **You (the orchestrator) own this lookup, not `site-processor`** — it has no registry access, same as every other credential-bearing state. For tracked sites (Step 2) `scripts/prep-run.py` has already done it — each dispatch file carries `knownActiveTitles`. For a Step 3 discovery, before dispatching `site-processor`, run `timeout 5 sh scripts/fold-name.sh company "<company name>"` and look up `activeTitlesByCompany[<that output>]`. Pass whatever array you get (possibly empty) to `site-processor` as its `knownActiveTitles` input — it applies the matching title-side normalization itself via the same script (`timeout 5 sh scripts/fold-name.sh title "<title>"`) before comparing.
 - `uploadBudget` — `{ remaining, limit, resetInSeconds }`. **`remaining` is the MAXIMUM number of job postings you can upload this run** (hard cap, default 10/hour, bounds the damage if the token leaks).
 
 On the very first run the memory will be empty — expected. Build it up as you go via `sitesChecked`.
+
+### Prepare the run — one script, not your own Python ★
+
+The registry result is ~660K characters, so the harness saves it to a file and gives you the path.
+Hand that path straight to the prep script — do not write your own parsing, filtering or
+known-domains code:
+
+```
+timeout 120 python3 scripts/prep-run.py "<saved get_registry result file>"
+```
+
+It writes, under `/tmp/pestidev-run/`:
+- `plan.json` — the budget, and the Step 2 work lists already computed: `due` (oldest first),
+  `firstCheck` (`needs_first_check` entries), `deferred` (backed off — do nothing),
+  `skippedPermanentlyRejected` and `atsCrawlToRetire`.
+- `dispatch/<slug>.json` — one per `due`/`firstCheck` site, with its `storedListingUrls` copied
+  verbatim from the registry and its `knownActiveTitles` already looked up (same fold as
+  `scripts/fold-name.sh`). You pass agents this file's PATH, never its contents.
+- `results/` — emptied. Every agent writes its result here; Step 4 builds the payload from it.
+- `/tmp/pestidev-known-domains.txt` — the Step 3 de-duplication file.
+
+Every hand-written version of this bookkeeping eventually went wrong in a way the prose rules
+already forbade: join.com tenants collapsed in the known-domains file (2026-09-26, 09-29, 10-02),
+23 change-checks dispatched with empty `storedListingUrls` (09-28), a payload with garbage in a
+site's `listingUrls` (10-02).
+If a script fails, say so in your final report and fix the input it complains about; do not fall
+back to re-implementing it inline.
+
+### Dispatch agents in the FOREGROUND ★
+
+Every `Agent` call you make passes **`run_in_background: false`**. Processing is sequential anyway
+(the budget rule below), and parallel change-checks are simply several foreground `Agent` calls in
+ONE message — they still run concurrently and you get every result back before your next turn.
+A background dispatch makes you end your turn and wait to be woken, which is exactly how runs on
+2026-09-26 and 09-27 ended up calling `ScheduleWakeup` to poll their own agents. `ScheduleWakeup`
+and `CronCreate` are denied in `.claude/settings.json` for that reason — never try them.
 
 ### THE BUDGET RULE — and how to allocate it across agents
 
@@ -149,96 +185,75 @@ Stalling costs the POST — and a run that never POSTs produced nothing at all.
 
 ## Step 2 — re-check aged sites
 
-### ⚠ FIRST, before you dispatch anything — drop permanently-rejected sites out of the re-check list ★
+### ⚠ FIRST — the work list comes from `plan.json`, and what it leaves out stays out ★
 
-`permanentlyRejected` OUTRANKS `sites`. It is a `{slug, domain, company, reason}[]` array — build a
-Set of its `slug` values and REMOVE from your Step 2 work list every aged `sites` entry whose own
-key is in that Set (an exact lookup, not a text match — `sites["nixstech"]` drops the moment
-`nixstech` is in the Set). Also remove anything in the STRICT exclusion list in
-`.claude/agents/company-discovery.md`, matching on the bare domain/company there since that list has
-no slugs of its own.
+`permanentlyRejected` OUTRANKS `sites`. `prep-run.py` has already applied that: every `sites`
+entry whose slug is in `permanentlyRejected` is listed under `skippedPermanentlyRejected` and is in
+NO other list. Every tracked site on one of the eight `ats-crawl` hosts (`jobs.ashbyhq.com`,
+`*.greenhouse.io`, `*.lever.co`, `*.smartrecruiters.com`, `*.recruitee.com`,
+`*.jobs.personio.com`, `*.bamboohr.com`, `*.teamtailor.com` — the board's own hourly crawler,
+`cron_jobs_ATSCRAWL-background.mjs`, reads those since 2026-08-26) is under `atsCrawlToRetire`
+as a ready-made `rejected` record that Step 4's assembler sends once. Full rule — and the one gap
+it deliberately leaves open — lives in `.claude/agents/company-discovery.md`.
 
-**Remove the `ats-crawl` hosts as well** — every aged entry whose postings live on
-`jobs.ashbyhq.com`, `*.greenhouse.io`, `*.lever.co`, `*.smartrecruiters.com`, `*.recruitee.com`,
-`*.jobs.personio.com`, `*.bamboohr.com` or `*.teamtailor.com`. Since 2026-08-26 the board runs its
-own crawler over those eight platforms hourly (`cron_jobs_ATSCRAWL-background.mjs`, source
-`ats-crawl` — it started with the first four and grew to eight by 2026-09-01), so dispatching a
-`site-change-check` there spends an agent re-reading a listing another source already reads every
-hour. The difference from the permanently-rejected sites
-below: these have not been retired YET. Send each one ONCE under `rejected` with `ats-crawl` named
-as the reason, and from the next run on they drop out here with everything else. Full rule — and
-the one gap it deliberately leaves open — lives in `.claude/agents/company-discovery.md`.
-
-For a site removed this way:
+For a `skippedPermanentlyRejected` or `atsCrawlToRetire` site:
 - **Dispatch NOTHING for it — no `site-change-check`, no `site-processor`, and no inline fetch of
   your own.** There is no such thing as a "confirmation fetch" for a permanently-rejected site: the
   exclusion IS the confirmation, and re-touching the page is the entire risk.
-- **Do not send a `sitesChecked` entry for it.** That entry is exactly what keeps it alive in
-  `sites` and drags it back into the re-check window a week later.
-- **Do not re-send it under `rejected` either.** It is already permanent. Re-adding it only grows a
-  pile of near-duplicate entries for one company — this already happened repeatedly to Cellum Global
-  Zrt., each run re-noting the same complaint instead of the entry simply staying out of rotation.
-- Say it in ONE line of your final report — `skipped (permanently rejected): nixstech` — and stop
+- **Never send a `sitesChecked` entry for it** — that is exactly what keeps it alive in `sites`
+  and drags it back into the re-check window a week later — and never re-send an already-permanent
+  one under `rejected` (this already happened repeatedly to Cellum Global Zrt.). The assembler
+  refuses both.
+- Say it in ONE line of your final report — `skipped (permanently rejected): <count>` — and stop
   there.
 
 A stale `sites` entry you never touch is harmless; one you refresh every week is an incident waiting
 to happen again — confirmed 2026-08-21: `sites["nixstech"]` was re-fetched on schedule even though
 `permanentlyRejected` already held three separate entries for it (see INCIDENTS.md § `nix` / NIX
-Hungary Kft. / nixstech.com).
+Hungary Kft. / nixstech.com). Still drop anything in the STRICT exclusion list in
+`.claude/agents/company-discovery.md` from `due` by eye — that list has no slugs, so the script
+cannot apply it.
 
-**Entries with `status: "needs_first_check"` (no `lastChecked`, no `listingUrls`) are DUE NOW.** The
-server seeds them when another channel (the ChatGPT discovery) inserted a posting for a company this
-registry has never checked; `url` is just that one posting, not a listing page. Do NOT send them to
-`site-change-check` — there is no `storedListingUrls` to diff, so it would report the company's whole
-listing as new (the failure described below). Treat each as a brand-new company instead: dispatch
-`site-processor` sequentially under the budget rule, with `slug` → `slug`, the entry's `url` →
-`listingUrl` (a hint; the processor locates the real listing itself) and `knownActiveTitles` from the
-Step 1 lookup (the already-inserted posting will be there, so it is not re-submitted). Record the
-result in `sitesChecked` as usual — that sets `lastChecked` and `listingUrls`, and the entry becomes a
-normal one. Still subject to the `permanentlyRejected` / `ats-crawl` host removals above.
+**`deferred` sites are backed off — do nothing for them.** An earlier run recorded them as
+`js_rendered` / `bot_blocked`, or as a second fetch failure in a row, so they carry a `nextCheckAt`
+30 days out. They reappear in `due` on their own when it passes. This is what stops the same
+unreadable sites (Kulcssoft, MagNet Bank, iData, Webtown, IntegralVision, NN Biztosító) costing a
+fetch every week for nothing.
 
-For every REMAINING entry in `sites` whose `lastChecked` is more than 7 days ago:
+**`firstCheck` entries (`status: "needs_first_check"`) are DUE NOW.** The server seeds them when
+another channel (the ChatGPT discovery) inserted a posting for a company this registry has never
+checked; their `url` is just that one posting, not a listing page. Do NOT send them to
+`site-change-check` — there is no stored set to diff, so it would report the company's whole
+listing as new. Treat each as a brand-new company: dispatch `site-processor` sequentially under the
+budget rule with `dispatchFile` set to the entry's dispatch file plus `budgetRemaining` (the file
+gives it the `url` as a listing hint, `knownActiveTitles` — the already-inserted posting will be in
+there, so it is not re-submitted — and `resultFile`). Leave `evaluateOnly` unset.
 
-1. **Dispatch `site-change-check`** with the site's `url`, `slug`, `storedListingUrls`, and any
-   `platformNote` you have for it. These are cheap and may run in parallel.
+For every `due` site:
 
-   **Name that third field `storedListingUrls` exactly** — that is what the agent's input contract
-   calls it. The value is the site's stored `listingUrls` array from the registry, passed verbatim.
-   Calling it `listingUrls` in the dispatch is the same mistake as omitting it: the agent finds no
-   set to diff against, so it reports `changed: false` with an empty `currentListingUrls` no matter
-   what is actually on the page, and the real diff is silently lost.
+1. **Dispatch `site-change-check` with ONE input: `dispatchFile: <the plan entry's dispatchFile>`.**
+   Nothing else — the file carries `url`, `slug`, `company`, `platformNote` and
+   `storedListingUrls`, and the agent reads the stored set from it directly. Dispatch
+   several in one message (foreground) to run them in parallel.
 
-   Confirmed 2026-09-02: an omitted field once made every agent in a run infer `changed: false`
-   from it, wrongly reporting all 14 sites unchanged with empty sets (full story: INCIDENTS.md §
-   `storedListingUrls` dispatch field must be named exactly).
-
-   A `changed: false` carrying an EMPTY `currentListingUrls` for a site whose stored set was not
-   empty is that failure, not a real result. Treat it as a bad dispatch: check that you named the
-   field correctly and re-dispatch. Never write that empty set into `sitesChecked` — doing so
-   overwrites a good stored listing with nothing and destroys the next run's diff too.
-
-   The agent also reports this itself: a `note` beginning `NO storedListingUrls IN DISPATCH` means
-   the field never arrived. That result comes back as `changed: true` with EVERY current URL listed
-   as new — because with nothing to diff against, everything looks new. **Never feed those `newUrls`
-   to `site-processor`.** Two separate things go wrong at once:
-   - It is the site's whole listing, so it would spend the entire upload budget on one company
-     re-judging postings that were judged on earlier runs — the budget rule below exists to stop that.
-   - The rotated-URL check in step 4 of the agent's instructions ALSO diffs against
-     `storedListingUrls`, so without the field it cannot run either. Every rotated URL therefore
-     arrives labelled "new", and submitting those mints a duplicate row on the live board for a
-     posting that is already there — exactly the joinus.hu incident that check was added to prevent.
-
-   Re-dispatch the change-check with the field correctly named and use the result of THAT run.
-2. Read what comes back:
-   - **`changed: false`** — nothing happened on that page since last time. Record the site in
-     `sitesChecked` with the `currentListingUrls` the agent returned, so `lastChecked` advances, and
-     move on. No detail page gets opened. This should be the common case.
-   - **`changed: true`** — dispatch `site-processor` for that company with `evaluateOnly` set to the
-     agent's `newUrls`, AND `knownActiveTitles` set per the Step 1 lookup above. A URL that was
-     already in the old `listingUrls` never needs re-opening: it was judged once already, accepted or
-     rejected, and re-judging an unchanged posting on a schedule is pure waste. This is also what
-     stops previously-rejected postings that still sit on the listing from being silently re-read
-     every single re-check forever.
+   This replaces passing `storedListingUrls` inline, which failed twice in the same way: an omitted
+   field made every agent report "unchanged" with empty sets (2026-09-02), and on 2026-09-28 a run
+   dispatched all 23 checks with the field empty (see INCIDENTS.md § `storedListingUrls` dispatch
+   field must be named exactly). A reply whose `note` opens `NO dispatchFile IN DISPATCH` means you
+   forgot the path — re-dispatch it with the path.
+2. Read what comes back (the agent has also written it to the site's `resultFile`):
+   - **`changed: false`** — nothing happened on that page since last time. Nothing more to do;
+     the result file already records it. This should be the common case.
+   - **`suspectExtraction: true`** — the page lost most of its stored URLs, which is almost always
+     a broken fetch (consent wall, JS shell, redesign), not a mass deletion. The agent already
+     carried the stored set forward. Only `newUrls`, if any, go to `site-processor`; never treat the
+     missing ones as removed. (2026-10-01: medicare came back with 0 of 47 — the run kept the stored
+     set by judgment; the agent now does it every time.)
+   - **`changed: true`** — dispatch `site-processor` with `dispatchFile` (the same file),
+     `evaluateOnly` set to the agent's `newUrls`, and `budgetRemaining`. A URL that was already in
+     the stored set never needs re-opening: it was judged once already, accepted or rejected, and
+     re-judging an unchanged posting on a schedule is pure waste. Its result overwrites the
+     change-check's in the same `resultFile`, which is what you want.
 
      **Exception — a large `newUrls` batch that is a bulk non-IT vertical ★** If `newUrls` has 15 or
      more entries, do not dispatch `site-processor` blind. First derive a rough title per URL by
@@ -248,9 +263,9 @@ For every REMAINING entry in `sites` whose `lastChecked` is more than 7 days ago
      EVERY result comes back `itRelevant: false`, this is a bulk non-IT posting batch (a
      cleaning/security staffing run, a sales/retail hiring wave, etc. — the company's whole vertical
      at this listing isn't IT, not a title-level miss on an otherwise mixed page): skip the
-     `site-processor` dispatch for this batch, and record the site in `sitesChecked` as usual (status
-     reflecting no fit, the full `currentListingUrls`) so `lastChecked` still advances — this is not a
-     `rejected` entry, since the listing can change again next week and deserves a fresh look then.
+     `site-processor` dispatch for this batch. The change-check's result file still records the site
+     with its full current set, so `lastChecked` advances — this is not a `rejected` entry, since
+     the listing can change again next week and deserves a fresh look then.
      Name it in your final report (site + count + "0/N itRelevant, skipped processor") so the skip is
      auditable, since a de-slugged title is a guess. **If even ONE result comes back `itRelevant:
      true`, or a candidate's de-slugged guess is too mangled for `check_titles` to judge, fall back to
@@ -259,13 +274,15 @@ For every REMAINING entry in `sites` whose `lastChecked` is more than 7 days ago
      URLs, all cleaning/security roles) and `bydeurope` (32 new URLs, all EU sales/marketing roles)
      both hit `changed: true` and got skipped by hand instead of this check, as a one-off time-budget
      call — see INCIDENTS.md § Bulk non-IT posting batches wasting a re-check dispatch.
-   - **`unreachable_timeout`** — record it with that status and the `listingUrls` you already had.
-3. **Always store the CURRENT full `listingUrls` set** in that site's `sitesChecked` entry — every
-   URL on the page right now, not just the new ones. That is what next run's comparison diffs
-   against. Whatever object you send for a site under `sitesChecked` is stored verbatim, so include
-   `"listingUrls": [...]` alongside url/company/status in the JSON.
+   - **`unreachable_timeout` / `fetch_error` / `bot_blocked` / `js_rendered`** — nothing more to do;
+     the result file carries the stored set forward and Step 4 applies the backoff.
+3. **Never edit a result file by hand to "fix" a listing.** If an agent's result is wrong, re-dispatch
+   it. The files are the record; `scripts/assemble-payload.py` turns them into `sitesChecked` with
+   the CURRENT full `listingUrls` set per site, which is what next run's comparison diffs against.
 
-Include every site you touched in `sitesChecked` regardless of outcome.
+Every site you dispatch an agent for ends up in `sitesChecked` (or `rejected`) through its result
+file — the assembler refuses a run where a result file exists but the site is missing, which is the
+"built `sitesChecked`, forgot one slug" slip from 2026-09-13/09-14.
 
 ### ⚠ A "new" URL is not always a new posting — trust `site-change-check`'s churn filtering ★
 
@@ -276,7 +293,7 @@ identity and the API has no way to know two different URL strings are the same p
 2026-09-02 on Knorr-Bremse's joinus.hu portal; see INCIDENTS.md § URL rotation vs. a genuinely new
 posting).
 
-`site-change-check` now applies `scripts/strip-url-tail.sh` before it reports `newUrls` — trust
+`site-change-check` applies `scripts/strip-url-tail.sh` before it reports `newUrls` — trust
 that list rather than re-deriving your own diff. If you ever compute a URL diff yourself for a site
 (e.g. after recovering from an `unreachable_timeout`, or because `site-change-check` was skipped),
 run `timeout 5 sh scripts/strip-url-tail.sh "<url>"` yourself on the candidate and on every stored
@@ -287,34 +304,23 @@ between the outputs as the same posting rotating, not a new one.
 
 With remaining budget:
 
-1. **Write the de-duplication list to a FILE first, then dispatch `company-discovery`** with that
-   file's path as `knownDomainsFile`, plus how many candidates you want. It rotates across
-   role/platform/sector query buckets and de-duplicates by domain before it returns anything.
+1. **Dispatch `company-discovery`** with `knownDomainsFile: /tmp/pestidev-known-domains.txt` (already
+   written by `prep-run.py` in Step 1 — do not write your own) plus how many candidates you want.
+   It rotates across role/platform/sector query buckets and de-duplicates every hit with
+   `scripts/known-domains.py check`, the same script that built the file.
 
-   Write one entry per line, derived from each `sites` record's `url`: **on a shared multi-tenant
-   ATS host** (`greenhouse.io`, `lever.co`, `ashbyhq.com`, `smartrecruiters.com`, `recruitee.com`,
-   `personio.com`, `workable.com`, `breezy.hr`, `join.com`, `karrierportal.hu`, `hrfelho.hu` — the
-   same list `company-discovery.md` uses) write the hostname PLUS the tenant path, e.g.
-   `join.com/companies/kfs1`, never the bare host `join.com` alone — the tenant slug is the actual
-   identity there, and `company-discovery` matches whole-line against exactly this shape. **For
-   every other site, write the bare hostname with any leading `www.` stripped** (`www.aican.hu` →
-   `aican.hu`) — `grep -qxF` is an exact whole-line match, so a stored `www.`-prefixed hostname
-   silently fails to match a candidate the discovery agent finds without it, and vice versa. Do the
-   same for each `permanentlyRejected` record's `domain` (fall back to `company` when a record has
-   no `domain`). Write the result to `/tmp/pestidev-known-domains.txt`, and pass that path.
-
-   A lone `join.com` line can't tell one tenant apart from any other company on that host — writing
-   the full tenant path is what closes that gap, rather than relying on the orchestrator to keep
-   catching it by hand (confirmed recurring bug, same three join.com tenants each time; see
-   INCIDENTS.md § join.com tenant collisions in the known-domains file). A `www.`-prefixed hostname
-   is the same kind of gap for ordinary sites — stripping it before writing is what closes that one
-   (confirmed 2026-09-20, AiCAN re-surfaced as "new" this way; see INCIDENTS.md § `www.`-prefix
-   domain mismatches in the known-domains dedup).
+   That one script is what normalizes both sides the same way: the tenant path on shared ATS hosts
+   (`join.com/companies/kfs1`, never a bare `join.com`), `www.` stripped, and a company's own
+   subdomain matched to its parent (`karrier.nisz.hu` ⇄ `nisz.hu`). When each run wrote this file
+   with its own code, the same three join.com tenants came back as "new" on 2026-09-26, 09-29 and
+   10-02 even though this file already spelled out the tenant-path rule, and NISZ / Pont Systems
+   slipped through on a subdomain mismatch on 09-30 (see INCIDENTS.md § join.com tenant collisions
+   in the known-domains file, § `www.`-prefix domain mismatches in the known-domains dedup).
 
    **Do not paste the list into the dispatch prompt.** It is ~900 lines, and an inline list that size
    is one the dispatch will drop under its own weight (confirmed 2026-09-02 — see INCIDENTS.md §
-   `knownDomainsFile` must be loaded). The agent has `Bash` and `Read`, so it greps the file
-   directly — the list can grow without ever making the dispatch bigger.
+   `knownDomainsFile` must be loaded). The agent reads the file directly — the list can grow
+   without ever making the dispatch bigger.
 
    The agent returns `checkedAgainst`, the number of lines it actually loaded. **If that is 0 or
    missing, its candidates were not de-duplicated** — check the file was written and re-dispatch,
@@ -345,10 +351,13 @@ With remaining budget:
    - Note in your final report that the agent was cut off and its result came from its checkpoint,
      with the `bucketsUsed` count so it's clear how much of a rotation actually completed.
 3. **For each candidate it returns, dispatch `site-processor`** — sequentially, decrementing the
-   budget after each one per the budget rule above. **Re-check each candidate's company and domain
-   against `permanentlyRejected`, the exclusion list and the eight `ats-crawl` hosts
-   (`jobs.ashbyhq.com`, `*.greenhouse.io`, `*.lever.co`, `*.smartrecruiters.com`, `*.recruitee.com`,
-   `*.jobs.personio.com`, `*.bamboohr.com`, `*.teamtailor.com`) before dispatching**, even though the
+   budget after each one per the budget rule above. **First run every candidate through the same
+   check the agent used, in one call** —
+   `timeout 30 python3 scripts/known-domains.py check "<hintUrl or domain>" ... --file /tmp/pestidev-known-domains.txt`
+   — and drop every `KNOWN` one. Then re-check the rest against the exclusion list and the eight
+   `ats-crawl` hosts (`jobs.ashbyhq.com`, `*.greenhouse.io`, `*.lever.co`, `*.smartrecruiters.com`,
+   `*.recruitee.com`, `*.jobs.personio.com`, `*.bamboohr.com`, `*.teamtailor.com`) before
+   dispatching**, even though the
    discovery agent already de-duplicated: a candidate matching any of them is dropped silently — no
    processor, no `sitesChecked`, no fresh `rejected` entry. A candidate on one of those eight hosts
    should never reach you at all; if one does, the discovery agent has drifted off its own rule and
@@ -359,9 +368,9 @@ With remaining budget:
    can already be live under a hand scraper or `ats-crawl` even for a company this routine has never
    tracked before). Leave `evaluateOnly` unset for a discovery — a new company has no previously-judged
    URLs, so every posting on its listing must be opened (though still skipped before a detail fetch if
-   `knownActiveTitles` matches it).
-4. Record every candidate in `sitesChecked` or `rejected` according to the status the processor
-   returns.
+   `knownActiveTitles` matches it). Also pass `resultFile: /tmp/pestidev-run/results/<slug>.json`.
+4. Nothing to record by hand: the processor writes its result to `resultFile`, and Step 4's
+   assembler turns it into a `sitesChecked` entry, or a `rejected` record for `reject_permanent`.
 
 Do not second-guess the discovery agent's de-duplication by re-searching yourself, and do not open
 a candidate's career page inline — dispatch the processor.
@@ -414,11 +423,28 @@ Only include a label from this list if the posting actually named it, or an obvi
 
 ### Assemble and submit
 
-Submit everything from this run in ONE call. There is no git, no file to write, no commit — this
-call IS your output. If you skip it, the entire run is lost.
+Submit everything from this run in ONE call. There is no git, no commit — this call IS your output.
+If you skip it, the entire run is lost.
 
-Call `submit_findings` with the payload as its arguments — the same three keys, the same shapes,
-exactly as documented below:
+**You do not build the payload yourself — the assembler does, from the result files.** Three steps:
+
+1. **Write `/tmp/pestidev-run/tech-labels.json`** with the `Write` tool: one entry per finding, its
+   `url` → the comma-joined canonical labels you mapped from its `techMentions` (the mapping rules
+   above). `{}` when there are no findings. This is the one part of the payload that is your
+   judgment.
+2. **Run** `timeout 120 python3 scripts/assemble-payload.py`. It builds `findings` (title, url,
+   company, location and `experienceLiteral` → `experience` straight from each processor's result,
+   `titleApiRisk` and other agent-only fields stripped, trimmed to the upload budget), `sitesChecked`
+   (every result file, failed fetches carrying their stored set forward, the 30-day backoff
+   applied), and `rejected` (`reject_permanent` results plus `atsCrawlToRetire`), then validates the
+   lot against the registry. Exit 0 prints `OK — submit exactly: /tmp/pestidev-run/payload.json`.
+   Exit 1 prints every error and writes nothing you may submit — fix the cause (re-dispatch the
+   agent whose result file is broken, fix a label in `tech-labels.json`) and run it again.
+3. **Read `payload.json` and call `submit_findings` with its three keys exactly as they are.** Do
+   not add, drop, reorder or "tidy" anything on the way — a hand-assembled payload put garbage text
+   into a site's `listingUrls` on 2026-10-02 and needed a correction call.
+
+For reference, the shape it produces — the same three keys the API has always taken:
 
 ```json
 {
@@ -437,7 +463,8 @@ exactly as documented below:
 Send it ONCE. A tool call that returned a result has been applied — re-sending it double-counts
 against the upload budget.
 
-Field rules:
+Field rules (the assembler and `pestidev_lib.validate_payload` implement these — they are here so
+you can read its errors, and for the slugs you choose for Step 3 discoveries):
 - `slug` — short lowercase identifier for the COMPANY/site. Becomes the DB source `AI - <slug>`. Use the SAME slug consistently for the same company across runs. Match slugs already used for known companies — argonsoft, hyperteam, vadalarm, turbotech, m2mserver, flexinform, novaservices, kfs1, biconsulting, pannonset, bkk, alfa, posta, kh, 4ig, mavir, datapao — so you don't create a duplicate bucket for a company already in the DB.
 - `location` — pass through the agent's `location` verbatim. Leave it empty/omit only when the agent reported nothing, since an empty field is itself what tells the API's backstop filter to keep the row.
 - `experience` — pass through the agent's `experienceLiteral` verbatim, and NOTHING else. Do not substitute the agent's `levelJudgment` here, and do not write your own impression. The API HARD-DISCARDS a bare level word in this field unless the title itself independently confirms it — as of 2026-07-23 it no longer trusts even an exact canonical word here, because that is exactly how a bare guess with zero textual backing slipped through twice (see INCIDENTS.md § `experienceLiteral` must trace to real text, never a guess). `levelJudgment` is what decided accept/reject inside the agent; `experienceLiteral` is the only thing that may reach this field.
@@ -516,13 +543,18 @@ Then a short plain-text summary. For EVERY site touched this run (re-check or ne
 
 Then: how many known sites you re-checked and their results, how many new companies were investigated and their outcomes, the exact list of any NEW findings submitted (title/url/company/level), and the API's response — whether the tool result was `ok:true` or `isError`, how many rows it accepted per source versus how many you sent, and `rateLimit.throttled` if non-zero. Also report Step 3b's `submit_ats_tenants` counts (`added`/`alreadyKnown`/`notFound`/`rejected`), or say you skipped it and why.
 
+Also give, from `plan.json` and the assembler's output: the `deferred` count (sites skipped by
+backoff), every `backoff:` line the assembler printed (sites newly backed off this run), every
+`WARNING:` line, and any site whose change-check came back `suspectExtraction: true`.
+
 If `skippedNonIt` or `skippedSenior` came back non-zero, give it its own line — name the specific title(s), read straight off `results` (per the lookup rule above, not attributed by guessing), and if it's a new title shape not already in site-processor.md's "Known API-rejected title shapes" list, say plainly that it's worth adding. Reading `results` is now the only way that list grows accurately — the API tells you exactly which row it dropped and why, so there is no excuse for adding a shape from a guess.
 
 If the POST failed for any reason, say so explicitly and prominently: that means this run saved nothing.
 
 **If the POST failed after all retries, print the complete submission payload verbatim** in a
-fenced ```json block as the last thing in your report — the exact object you tried to send,
-`findings`, `sitesChecked` and `rejected` together. Your scratch files are destroyed when this
+fenced ```json block as the last thing in your report — the exact contents of
+`/tmp/pestidev-run/payload.json`, `findings`, `sitesChecked` and `rejected` together (`cat` it;
+don't retype it). Your scratch files are destroyed when this
 session ends, so that block is the only surviving copy and the only way the owner can replay the
 run by hand. Do not truncate it or summarise it as "12 findings omitted for brevity" — a payload
 nobody can replay is the same as no payload (confirmed 2026-08-26 — a full run's verified work was
